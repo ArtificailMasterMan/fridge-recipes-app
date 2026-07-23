@@ -51,26 +51,37 @@ Fridge images are uploaded temporarily to `/api/scan-fridge`, sent to Claude vis
 - Email/password sign-up, sign-in, sign-out, and remembered sessions
 - Multiple private user accounts
 - Explicit macro-target saving with success/error feedback
+- Live local date and clock display
+- Automatic local-midnight rollover to a new daily food log while preserving prior days
 - Daily food logging and undo
 - Remaining calorie and macro calculations
 - Ingredient-list saving
+- Bulk ingredient rename, selection, deletion, and cancellation before saving
+- Separate fridge and pantry photo modes
+- Pantry-aware shelf, can, jar, box, bag, and visible-label scan guidance
+- Review-before-save photo detections with keep/remove, rename, add, confidence, and uncertainty controls
+- Undo for the most recently confirmed scan additions
 - Generated-recipe saving and removal
+- Authenticated website recipe import using structured Recipe JSON-LD
+- Imported recipe storage limited to name, ingredients, and instructions
+- URL-import protections for private/internal destinations, redirects, timeouts, content type, and response size
 - Data persistence after reload
 - Cross-browser and desktop/phone synchronization for the same account
 - User separation through verified Firebase user IDs
 - Responsive mobile interface and phone camera intent
 - Authenticated server-side account storage
 - Firestore database access through Firebase Admin
+- Black Lab/bulldog mascot with a patchy white chest and mismatched white paws
 
-## Under active testing
+## Current production test focus
 
-The photo → ingredients → meals workflow is the current focus.
+The photo → review → ingredients → meals workflow and website recipe imports should receive final phone testing after deployment.
 
-Known issue being addressed:
+Current boundaries:
 
-- The existing mobile input strongly prefers the camera because it uses `capture="environment"` on the only file input. The app needs separate **Take photo** and **Choose from library** controls.
-- HEIC/HEIF is not currently supported by the Claude image request. The app should reject it clearly and suggest JPEG/PNG or an iPhone screenshot until conversion is implemented.
-- The earlier message “The string did not match the expected pattern” did not provide enough stage-specific detail; scan errors need clearer handling.
+- HEIC/HEIF is not supported by the Claude image request. The app rejects it clearly and suggests JPEG/PNG or an iPhone screenshot until conversion is implemented.
+- Website imports require a page that publishes a complete Schema.org `Recipe` JSON-LD object. The importer returns an error instead of inventing missing recipe content.
+- The clock uses the device’s local calendar day. At local midnight, the app loads a new empty daily log; macro targets, kitchen ingredients, recipes, and prior dated logs remain saved.
 
 ## Required Vercel environment variables
 
@@ -134,16 +145,18 @@ Vite variables are embedded during the build. Any change to a `VITE_*` variable 
 
 ## Recommended next test
 
-After the separate photo controls are deployed:
+After the new build is deployed:
 
-1. On iPhone, choose a clear JPEG/PNG fridge photo with 4–6 visible items.
-2. Confirm a preview appears and the selected file is identified.
-3. Scan it and compare every detected ingredient with the photo.
-4. Remove false detections and add missed ingredients.
-5. Request a meal.
-6. Reject any recommendation that is not appetizing or practical.
-7. Save a good recipe and reload to verify persistence.
-8. Repeat with poor lighting, clutter, partial labels, and multiple shelves.
+1. On iPhone, select **Pantry** and choose a clear JPEG/PNG photo with several visible cans, jars, boxes, and bags.
+2. Confirm the scan opens a review prompt and does not change the kitchen list yet.
+3. Uncheck a result, rename one, add a missed item, and confirm. Verify only the kept items appear.
+4. Use **Undo last scan additions**, then scan and confirm again.
+5. Open **Edit list**, select several ingredients, delete them, rename another item, and save once. Reopen edit mode and verify **Cancel** discards unsaved edits.
+6. Request a meal and reject any recommendation that is not appetizing, cohesive, and practical.
+7. Import a recipe URL from a site with structured recipe data. Verify only its name, ingredients, and instructions are displayed after reload.
+8. Verify the live clock shows the phone’s local time. For practical rollover testing, leave the app open across local midnight or simulate a date change in a development browser and confirm the daily food log changes days while targets remain.
+9. Check the black dog mascot sits beside the fridge without obscuring the mobile hero.
+10. Sign in from another browser or device and confirm the kitchen and recipes sync privately to the same account.
 
 ## Security
 
@@ -155,9 +168,9 @@ After the separate photo controls are deployed:
 ## Later improvements
 
 - Native HEIC/HEIF conversion before scanning
-- Detection confidence and uncertainty notes in the confirmation UI
-- Multiple-photo fridge scans
+- Multiple-photo fridge and pantry scans
 - Better ingredient quantity/condition confirmation
+- Recipe-import fallback for sites without structured `Recipe` JSON-LD
 - Stronger recipe response validation
 - Persistent, distributed AI rate limiting
 - Password reset and account deletion

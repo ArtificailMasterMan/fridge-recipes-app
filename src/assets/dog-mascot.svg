@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 250" role="img" aria-labelledby="title">
+  <title id="title">Strong black Lab and bulldog mix with a white chest and mismatched white paws</title>
+  <g stroke="#1e4834" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path fill="#202923" d="M45 76C27 55 29 25 49 12c18 11 28 31 25 52m101 12c18-21 16-51-4-64-18 11-28 31-25 52"/>
+    <path fill="#252e28" d="M52 71c-10 11-14 27-10 43-18 19-27 49-25 90h184c2-42-8-71-29-91 4-17 0-32-11-43-23-23-84-25-109 1z"/>
+    <path fill="#202923" d="M52 100c-4 34 18 58 57 58s63-24 59-58c-3-27-27-44-59-44s-54 17-57 44z"/>
+    <path fill="#fbfaf5" d="M87 145c-2 22 5 51 21 70 17-18 27-47 22-71-7 8-15 12-23 9-7 3-14-1-20-8z"/>
+    <path fill="#202923" d="M36 226c-5-34 4-71 24-94m125 94c4-33-6-70-27-94"/>
+    <path fill="#fbfaf5" d="M25 218h55v25c-12 7-43 7-55 0z"/>
+    <path fill="#202923" d="M136 218h56v25c-13 7-43 7-56 0z"/>
+    <path fill="#fbfaf5" d="M162 218h30v25c-7 5-20 6-30 3z"/>
+    <ellipse cx="80" cy="99" rx="5" ry="7" fill="#fbfaf5" stroke="none"/>
+    <ellipse cx="140" cy="99" rx="5" ry="7" fill="#fbfaf5" stroke="none"/>
+    <path fill="#141b17" d="M92 115c9-6 27-6 35 0-2 11-9 17-18 17s-15-6-17-17z"/>
+    <path fill="none" d="M109 132c0 9-8 14-18 11m18-11c0 9 9 14 19 11"/>
+    <path fill="#e26742" d="M100 145c5 8 15 8 20 0-2 13-17 15-20 0z" stroke-width="4"/>
+  </g>
+</svg>

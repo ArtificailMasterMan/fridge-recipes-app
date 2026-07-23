@@ -18,7 +18,7 @@ export function adminDatabase() {
 
 export async function requireUser(request) {
   const header = request.headers.authorization || ''
-  if (!header.startsWith('Bearer ')) throw new Error('Sign in to use AI features.')
+  if (!header.startsWith('Bearer ')) throw new Error('Sign in to continue.')
   const token = header.slice(7)
   return getAuth(adminApp()).verifyIdToken(token)
 }
@@ -39,7 +39,7 @@ export function anthropic() {
 
 export function sendError(response, error) {
   const message = error instanceof Error ? error.message : 'Something went wrong.'
-  const status = message === 'Sign in to use AI features.' ? 401 : message.includes('Too many') ? 429 : message.includes('not configured') ? 503 : 502
+  const status = message === 'Sign in to continue.' ? 401 : message.includes('Too many') ? 429 : message.includes('not configured') ? 503 : 502
   response.status(status).json({ error: message })
 }
 

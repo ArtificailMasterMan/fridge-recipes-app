@@ -5,13 +5,19 @@ const MAX_MACRO = 20_000
 const MAX_TEXT = 500
 const macro = (value) => Number.isFinite(Number(value)) ? Math.max(0, Math.min(MAX_MACRO, Math.round(Number(value)))) : 0
 const text = (value, maximum = MAX_TEXT) => typeof value === 'string' ? value.trim().slice(0, maximum) : ''
-const date = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value || '') ? value : new Date().toISOString().slice(0, 10)
+const date = (value) => {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
+  const [year, month, day] = value.split('-').map(Number)
+  const parsed = new Date(Date.UTC(year, month - 1, day))
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day ? value : null
+}
 const meal = (value) => ({
   name: text(value?.name, 120), timeMinutes: Number.isFinite(Number(value?.timeMinutes)) ? Math.max(0, Math.min(600, Math.round(Number(value.timeMinutes)))) : null,
   calories: macro(value?.calories), protein: macro(value?.protein), carbs: macro(value?.carbs), fat: macro(value?.fat),
   macroFit: text(value?.macroFit, 100), inventory: text(value?.inventory, 200), whyItFits: text(value?.whyItFits, 500),
   missingIngredients: Array.isArray(value?.missingIngredients) ? value.missingIngredients.map((item) => text(item, 100)).filter(Boolean).slice(0, 8) : [],
   steps: Array.isArray(value?.steps) ? value.steps.map((item) => text(item, 300)).filter(Boolean).slice(0, 8) : [],
+  source: 'generated',
 })
 
 function entriesFrom(snapshot) {
@@ -25,6 +31,7 @@ export default async function handler(request, response) {
     const database = adminDatabase()
     const root = database.collection('users').doc(user.uid)
     const currentDate = date(request.method === 'GET' ? request.query.date : request.body?.date)
+    if (!currentDate) return response.status(400).json({ error: 'A valid local calendar date is required.' })
 
     if (request.method === 'GET') {
       const [profile, ingredients, entries, savedRecipes] = await Promise.all([
