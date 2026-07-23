@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signOut, type User } from 'firebase/auth'
-import { addDoc, collection, deleteDoc, doc, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore'
-import { auth, database, firebaseConfigurationError } from './firebase'
+import { auth, firebaseConfigurationError } from './firebase'
 import './App.css'
 
 type Macros = { calories: number; protein: number; carbs: number; fat: number }
@@ -10,16 +9,13 @@ type FoodEntry = Macros & { id: string; name: string; category: string; serving:
 type Meal = Macros & { name: string; timeMinutes: number | null; macroFit: string; inventory: string; whyItFits: string; missingIngredients: string[]; steps: string[] }
 type SavedRecipe = Meal & { id: string }
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
+type AccountData = { profile: Profile | null; ingredients: string[]; entries: FoodEntry[]; savedRecipes: SavedRecipe[] }
 const emptyMacros: Macros = { calories: 0, protein: 0, carbs: 0, fat: 0 }
 const emptyProfile: Profile = { name: '', ...emptyMacros }
 const today = () => new Date().toISOString().slice(0, 10)
 const number = (value: string) => Math.max(0, Number(value) || 0)
 const macroLine = (macros: Macros) => `${Math.round(macros.calories)} kcal · ${Math.round(macros.protein)}P / ${Math.round(macros.carbs)}C / ${Math.round(macros.fat)}F`
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message.replace('Firebase: ', '') : fallback
-const waitForFirestore = <T,>(operation: Promise<T>) => Promise.race<T>([
-  operation,
-  new Promise<T>((_, reject) => window.setTimeout(() => reject(new Error('Firestore did not confirm this save. Check your connection and try again.')), 10000)),
-])
 
 function App() {
   const [user, setUser] = useState<User | null>(null)
@@ -55,20 +51,37 @@ function App() {
   const inputRef = useRef<HTMLInputElement>(null)
   const currentDate = today()
 
+  async function accountRequest<T>(method: 'GET' | 'POST', body?: Record<string, unknown>) {
+    if (!user) throw new Error('Sign in to save your data.')
+    const token = await user.getIdToken()
+    const response = await fetch(method === 'GET' ? `/api/account-data?date=${encodeURIComponent(currentDate)}` : '/api/account-data', {
+      method, headers: { Authorization: `Bearer ${token}`, ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) }, body: method === 'POST' ? JSON.stringify({ ...body, date: currentDate }) : undefined,
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || 'Could not save account data.')
+    return data as T
+  }
+
+  async function loadAccountData() {
+    if (!user) return
+    setDataLoading(true); setDataError('')
+    try {
+      const data = await accountRequest<AccountData>('GET')
+      const nextProfile = data.profile || emptyProfile
+      setProfile(nextProfile); setProfileDraft(nextProfile); setIngredients(data.ingredients || []); setEntries(data.entries || []); setSavedRecipes(data.savedRecipes || [])
+    } catch (error) { setDataError(errorMessage(error, 'Could not load your account data.')) }
+    finally { setDataLoading(false) }
+  }
+
   useEffect(() => {
     if (!auth) { setAuthLoading(false); return }
     return onAuthStateChanged(auth, (nextUser) => { setUser(nextUser); setAuthLoading(false) }, (error) => { setAuthError(errorMessage(error, 'Could not check your account.')); setAuthLoading(false) })
   }, [])
-
   useEffect(() => {
-    if (!user || !database) { setProfile(emptyProfile); setProfileDraft(emptyProfile); setEntries([]); setIngredients([]); setSavedRecipes([]); return }
-    setDataLoading(true); setDataError('')
-    const root = doc(database, 'users', user.uid)
-    const stopProfile = onSnapshot(doc(root, 'profile', 'default'), (snapshot) => { const next = snapshot.exists() ? snapshot.data() as Profile : emptyProfile; setProfile(next); setProfileDraft(next); setDataLoading(false) }, (error) => { setDataError(`Could not load targets: ${errorMessage(error, 'Firestore denied the request.')}`); setDataLoading(false) })
-    const stopIngredients = onSnapshot(doc(root, 'ingredients', 'current'), (snapshot) => setIngredients(Array.isArray(snapshot.data()?.items) ? snapshot.data()?.items : []), (error) => setDataError(`Could not load ingredients: ${errorMessage(error, 'Firestore denied the request.')}`))
-    const stopEntries = onSnapshot(query(collection(root, 'dailyLogs', currentDate, 'entries'), orderBy('createdAt', 'asc')), (snapshot) => setEntries(snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() }) as FoodEntry)), (error) => setDataError(`Could not load food log: ${errorMessage(error, 'Firestore denied the request.')}`))
-    const stopRecipes = onSnapshot(query(collection(root, 'savedRecipes'), orderBy('savedAt', 'desc')), (snapshot) => setSavedRecipes(snapshot.docs.map((recipe) => ({ id: recipe.id, ...recipe.data() }) as SavedRecipe)), (error) => setDataError(`Could not load saved recipes: ${errorMessage(error, 'Firestore denied the request.')}`))
-    return () => { stopProfile(); stopIngredients(); stopEntries(); stopRecipes() }
+    if (!user) { setProfile(emptyProfile); setProfileDraft(emptyProfile); setEntries([]); setIngredients([]); setSavedRecipes([]); return }
+    void loadAccountData()
+    // Account data is intentionally reloaded only when the signed-in user or day changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, currentDate])
 
   const consumed = useMemo(() => entries.reduce<Macros>((total, entry) => ({ calories: total.calories + entry.calories, protein: total.protein + entry.protein, carbs: total.carbs + entry.carbs, fat: total.fat + entry.fat }), { ...emptyMacros }), [entries])
@@ -76,13 +89,13 @@ function App() {
   const targetSet = profile.calories > 0
 
   async function submitAuth(event: React.FormEvent) { event.preventDefault(); setAuthError(''); if (!auth) { setAuthError(firebaseConfigurationError || 'Firebase is unavailable.'); return }; try { if (authMode === 'sign-in') await signInWithEmailAndPassword(auth, email.trim(), password); else await createUserWithEmailAndPassword(auth, email.trim(), password) } catch (error) { setAuthError(errorMessage(error, 'Could not continue.')) } }
-  async function saveProfile() { if (!user || !database) return; setProfileState('saving'); setProfileError(''); try { await waitForFirestore(setDoc(doc(database, 'users', user.uid, 'profile', 'default'), { ...profileDraft, updatedAt: serverTimestamp() }, { merge: true })); setProfileState('saved') } catch (error) { setProfileState('error'); setProfileError(errorMessage(error, 'Could not save targets.')) } }
-  async function saveIngredients(nextIngredients: string[]) { if (!user || !database) return; setIngredientState('saving'); setIngredientError(''); try { await waitForFirestore(setDoc(doc(database, 'users', user.uid, 'ingredients', 'current'), { items: nextIngredients, updatedAt: serverTimestamp() })); setIngredientState('saved') } catch (error) { setIngredientState('error'); setIngredientError(errorMessage(error, 'Could not save ingredients.')) } }
+  async function saveProfile() { setProfileState('saving'); setProfileError(''); try { await accountRequest('POST', { action: 'save-profile', profile: profileDraft }); await loadAccountData(); setProfileState('saved') } catch (error) { setProfileState('error'); setProfileError(errorMessage(error, 'Could not save targets.')) } }
+  async function saveIngredients(items: string[]) { setIngredientState('saving'); setIngredientError(''); try { await accountRequest('POST', { action: 'save-ingredients', items }); await loadAccountData(); setIngredientState('saved') } catch (error) { setIngredientState('error'); setIngredientError(errorMessage(error, 'Could not save ingredients.')) } }
   function addIngredient(value = ingredientInput) { const clean = value.trim().replace(/\s+/g, ' '); if (!clean || ingredients.some((item) => item.toLowerCase() === clean.toLowerCase())) return; void saveIngredients([...ingredients, clean]); setIngredientInput('') }
-  async function addFood(event: React.FormEvent) { event.preventDefault(); if (!user || !database || !food.name.trim()) return; setFoodState('saving'); setFoodError(''); try { await waitForFirestore(addDoc(collection(database, 'users', user.uid, 'dailyLogs', currentDate, 'entries'), { ...food, name: food.name.trim(), nutritionSource: 'user-provided', createdAt: serverTimestamp() })); setFood({ name: '', category: 'Snack', serving: '', ...emptyMacros }); setFoodState('saved') } catch (error) { setFoodState('error'); setFoodError(errorMessage(error, 'Could not save food log.')) } }
-  async function removeLast() { if (!user || !database || !entries.length) return; setFoodState('saving'); setFoodError(''); try { const latest = await waitForFirestore(getDocs(query(collection(database, 'users', user.uid, 'dailyLogs', currentDate, 'entries'), orderBy('createdAt', 'desc'), limit(1)))); if (!latest.empty) await waitForFirestore(deleteDoc(latest.docs[0].ref)); setFoodState('saved') } catch (error) { setFoodState('error'); setFoodError(errorMessage(error, 'Could not remove the food entry.')) } }
-  async function saveRecipe(meal: Meal) { if (!user || !database) return; setRecipeState((current) => ({ ...current, [meal.name]: 'saving' })); try { await waitForFirestore(addDoc(collection(database, 'users', user.uid, 'savedRecipes'), { ...meal, savedAt: serverTimestamp() })); setRecipeState((current) => ({ ...current, [meal.name]: 'saved' })) } catch (error) { setRecipeState((current) => ({ ...current, [meal.name]: 'error' })); setDataError(`Could not save recipe: ${errorMessage(error, 'Firestore denied the request.')}`) } }
-  async function removeRecipe(recipeId: string) { if (!user || !database) return; try { await waitForFirestore(deleteDoc(doc(database, 'users', user.uid, 'savedRecipes', recipeId))) } catch (error) { setDataError(`Could not remove recipe: ${errorMessage(error, 'Firestore denied the request.')}`) } }
+  async function addFood(event: React.FormEvent) { event.preventDefault(); if (!food.name.trim()) return; setFoodState('saving'); setFoodError(''); try { await accountRequest('POST', { action: 'add-food', food }); await loadAccountData(); setFood({ name: '', category: 'Snack', serving: '', ...emptyMacros }); setFoodState('saved') } catch (error) { setFoodState('error'); setFoodError(errorMessage(error, 'Could not save food log.')) } }
+  async function removeLast() { if (!entries.length) return; setFoodState('saving'); setFoodError(''); try { await accountRequest('POST', { action: 'remove-last-food' }); await loadAccountData(); setFoodState('saved') } catch (error) { setFoodState('error'); setFoodError(errorMessage(error, 'Could not remove the food entry.')) } }
+  async function saveRecipe(meal: Meal) { setRecipeState((current) => ({ ...current, [meal.name]: 'saving' })); try { await accountRequest('POST', { action: 'save-recipe', recipe: meal }); await loadAccountData(); setRecipeState((current) => ({ ...current, [meal.name]: 'saved' })) } catch (error) { setRecipeState((current) => ({ ...current, [meal.name]: 'error' })); setDataError(`Could not save recipe: ${errorMessage(error, 'Account storage was unavailable.')}`) } }
+  async function removeRecipe(recipeId: string) { try { await accountRequest('POST', { action: 'remove-recipe', recipeId }); await loadAccountData() } catch (error) { setDataError(`Could not remove recipe: ${errorMessage(error, 'Account storage was unavailable.')}`) } }
   async function scanPhoto() { if (!scanFile || !user) return; setScanState('loading'); setScanError(''); const body = new FormData(); body.append('image', scanFile); try { const token = await user.getIdToken(); const response = await fetch('/api/scan-fridge', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Photo scan failed.'); await saveIngredients(Array.from(new Set([...ingredients, ...data.ingredients.map((item: { name: string }) => item.name)]))); setScanState('idle') } catch (error) { setScanState('error'); setScanError(errorMessage(error, 'Photo scan failed.')) } }
   async function getMeals() { if (!ingredients.length || !user) return; setMealState('loading'); setMealError(''); setMeals([]); try { const token = await user.getIdToken(); const response = await fetch('/api/recommend-meals', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ ingredients, remaining: targetSet ? remaining : null, mealRequest }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not make recommendations.'); setMeals(data.meals); setMealState('idle') } catch (error) { setMealState('error'); setMealError(errorMessage(error, 'Could not make recommendations.')) } }
 

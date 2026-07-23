@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { cert, getApps, initializeApp } from 'firebase-admin/app'
 import { getAuth } from 'firebase-admin/auth'
+import { getFirestore } from 'firebase-admin/firestore'
 
 const requests = new Map()
 
@@ -9,6 +10,10 @@ function adminApp() {
   const raw = process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT
   if (!raw) throw new Error('Firebase Admin is not configured.')
   return initializeApp({ credential: cert(JSON.parse(raw)) })
+}
+
+export function adminDatabase() {
+  return getFirestore(adminApp())
 }
 
 export async function requireUser(request) {
