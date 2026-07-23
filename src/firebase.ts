@@ -11,7 +11,15 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 }
 
-const app = initializeApp(firebaseConfig)
+const missingKeys = Object.entries(firebaseConfig)
+  .filter(([, value]) => !value)
+  .map(([key]) => key)
 
-export const auth = getAuth(app)
-export const database = getFirestore(app)
+export const firebaseConfigurationError = missingKeys.length
+  ? `This deployment is missing Firebase configuration: ${missingKeys.join(', ')}.`
+  : null
+
+const app = firebaseConfigurationError ? null : initializeApp(firebaseConfig)
+
+export const auth = app ? getAuth(app) : null
+export const database = app ? getFirestore(app) : null
