@@ -1,32 +1,32 @@
-# React + TypeScript + Vite
+# Fridge Recipes
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A hosted, mobile-friendly app that turns fridge ingredients into appetizing meal ideas while tracking daily calories and macros.
 
-Currently, two official plugins are available:
+- **Live app:** https://fridge-recipes-app.vercel.app/
+- **Current architecture, setup, status, and known issues:** [PROJECT_STATUS.md](PROJECT_STATUS.md)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Run locally
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Copy `.env.example` to `.env.local` and add the Firebase web configuration. For the local Express AI server, copy `server/.env.example` to `server/.env` and add the Anthropic key.
+
+```bash
+npm run dev
+```
+
+## Validate
+
+```bash
+npm run build
+```
+
+```bash
+npm run lint
+```
+
+## Security
+
+Never commit or share Anthropic API keys, Firebase Admin service-account JSON, `.env.local`, or `server/.env`.
