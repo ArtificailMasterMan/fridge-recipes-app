@@ -13,7 +13,7 @@ function adminApp() {
 }
 
 export function adminDatabase() {
-  return getFirestore(adminApp())
+  return getFirestore(adminApp(), 'default')
 }
 
 export async function requireUser(request) {
