@@ -5,9 +5,11 @@ import {
   calculateRemainingMacros,
   MAX_MEAL_REQUEST_LENGTH,
   MealRecommendationError,
+  mealFitsConstraints,
   mealFitsRemainingMacros,
   noFitMessage,
   normalizeMeal,
+  normalizeMealConstraints,
   normalizeMealRequest,
   normalizeRemainingMacros,
   parseMealRecommendationResult,
@@ -24,9 +26,13 @@ const validMeal = (overrides = {}) => ({
   carbs: 58,
   fat: 14,
   macroFit: 'Fits the remaining daily budget',
-  inventory: 'Ready with listed ingredients',
   whyItFits: 'Savory chicken, bright lemon, and rice make a cohesive bowl.',
-  missingIngredients: ['lemon'],
+  ingredients: ['chicken breast', 'rice', 'lemon', 'olive oil'],
+  requiredIngredients: ['lemon'],
+  optionalUpgrades: ['parsley'],
+  effort: 'standard',
+  usesOven: false,
+  flavorProfile: 'fresh',
   steps: ['Season and sear the chicken.', 'Serve it over cooked rice with lemon.'],
   ...overrides,
 })
@@ -46,110 +52,111 @@ test('rejects invalid nutrition instead of converting it to zero', () => {
   }
 })
 
-test('rejects blank names, missing descriptions, invalid time, and empty steps', () => {
+test('rejects blank names, incomplete structured fields, invalid time, and empty steps', () => {
   assert.equal(normalizeMeal(validMeal({ name: '   ' })), null)
   assert.equal(normalizeMeal(validMeal({ whyItFits: '' })), null)
+  assert.equal(normalizeMeal(validMeal({ ingredients: [] })), null)
+  assert.equal(normalizeMeal(validMeal({ effort: 'huge' })), null)
+  assert.equal(normalizeMeal(validMeal({ usesOven: 'no' })), null)
+  assert.equal(normalizeMeal(validMeal({ flavorProfile: 'sweet' })), null)
   assert.equal(normalizeMeal(validMeal({ timeMinutes: '30' })), null)
   assert.equal(normalizeMeal(validMeal({ steps: [] })), null)
-  assert.equal(normalizeMeal(validMeal({ steps: ['   '] })), null)
+})
+
+test('normalizes bounded meal preferences and hard exclusions', () => {
+  assert.deepEqual(normalizeMealConstraints({
+    maxTime: 30.4,
+    effort: 'minimal',
+    oven: 'no-oven',
+    flavor: 'spicy',
+    avoidedIngredients: [' Mushroom ', 'mushroom', 'pork'],
+    rejectedMeals: ['Old bowl'],
+  }), {
+    maxTime: 30,
+    effort: 'minimal',
+    oven: 'no-oven',
+    flavor: 'spicy',
+    avoidedIngredients: ['Mushroom', 'pork'],
+    rejectedMeals: ['Old bowl'],
+  })
+  assert.deepEqual(normalizeMealConstraints({ maxTime: 2, effort: 'hard', oven: 'sometimes', flavor: 'sweet' }), {
+    maxTime: null,
+    effort: 'any',
+    oven: 'any',
+    flavor: 'any',
+    avoidedIngredients: [],
+    rejectedMeals: [],
+  })
+})
+
+test('enforces time, effort, oven, flavor, rejected names, and avoided foods', () => {
+  assert.equal(mealFitsConstraints(validMeal(), { maxTime: 30, flavor: 'fresh' }), true)
+  assert.equal(mealFitsConstraints(validMeal(), { maxTime: 20 }), false)
+  assert.equal(mealFitsConstraints(validMeal(), { effort: 'minimal' }), false)
+  assert.equal(mealFitsConstraints(validMeal({ usesOven: true }), { oven: 'no-oven' }), false)
+  assert.equal(mealFitsConstraints(validMeal(), { flavor: 'spicy' }), false)
+  assert.equal(mealFitsConstraints(validMeal(), { rejectedMeals: ['Lemon chicken rice bowl'] }), false)
+  assert.equal(mealFitsConstraints(validMeal(), { avoidedIngredients: ['lemon'] }), false)
+  assert.equal(mealFitsConstraints(validMeal({ name: 'Chicken bowl', whyItFits: 'A savory rice bowl.', ingredients: ['chicken', 'rice'], requiredIngredients: [], optionalUpgrades: [], steps: ['Cook chicken.', 'Serve with rice.'] }), { avoidedIngredients: ['lemon'] }), true)
 })
 
 test('filters every applicable remaining macro regardless of macroFit prose', () => {
   const remaining = { calories: 520, protein: 42, carbs: 58, fat: 14 }
   assert.equal(mealFitsRemainingMacros(validMeal(), remaining), true)
-
   for (const key of ['calories', 'protein', 'carbs', 'fat']) {
-    assert.equal(
-      mealFitsRemainingMacros(validMeal({ [key]: remaining[key] + 0.1, macroFit: 'Perfect fit' }), remaining),
-      false,
-    )
+    assert.equal(mealFitsRemainingMacros(validMeal({ [key]: remaining[key] + 0.1, macroFit: 'Perfect fit' }), remaining), false)
   }
 })
 
-test('returns no-fit message when every meal exceeds a limit', () => {
+test('returns no-fit message when every meal exceeds a limit or hard choice', () => {
   const remaining = { calories: 400, protein: 50, carbs: 80, fat: 20 }
-  assert.deepEqual(recommendationResponse({ meals: [validMeal()] }, remaining), {
-    meals: [],
-    message: noFitMessage(remaining),
-  })
+  assert.deepEqual(recommendationResponse({ meals: [validMeal()] }, remaining), { meals: [], message: noFitMessage(remaining) })
+  assert.deepEqual(recommendationResponse({ meals: [validMeal()] }, null, { effort: 'minimal' }), { meals: [], message: noFitMessage(null) })
 })
 
 test('keeps valid meals, rejects malformed meals, and caps output at three', () => {
-  const value = {
-    meals: [
-      validMeal({ name: 'One' }),
-      validMeal({ name: 'Invalid', calories: '500' }),
-      validMeal({ name: 'Two' }),
-      validMeal({ name: 'Three' }),
-      validMeal({ name: 'Four' }),
-    ],
-  }
-  assert.deepEqual(
-    recommendationResponse(value, null).meals.map((meal) => meal.name),
-    ['One', 'Two', 'Three'],
-  )
+  const value = { meals: [validMeal({ name: 'One' }), validMeal({ name: 'Invalid', calories: '500' }), validMeal({ name: 'Two' }), validMeal({ name: 'Three' }), validMeal({ name: 'Four' })] }
+  assert.deepEqual(recommendationResponse(value, null).meals.map((meal) => meal.name), ['One', 'Two', 'Three'])
 })
 
 test('calculates server-side remaining macros and clamps consumed overages', () => {
-  assert.deepEqual(
-    calculateRemainingMacros(
-      { calories: 2_000, protein: 150, carbs: 200, fat: 70 },
-      [
-        { calories: 800, protein: 60, carbs: 90, fat: 25 },
-        { calories: 1_400, protein: 100, carbs: 80, fat: 20 },
-      ],
-    ),
-    { calories: 0, protein: 0, carbs: 30, fat: 25 },
-  )
+  assert.deepEqual(calculateRemainingMacros(
+    { calories: 2_000, protein: 150, carbs: 200, fat: 70 },
+    [{ calories: 800, protein: 60, carbs: 90, fat: 25 }, { calories: 1_400, protein: 100, carbs: 80, fat: 20 }],
+  ), { calories: 0, protein: 0, carbs: 30, fat: 25 })
   assert.equal(calculateRemainingMacros({}, []), null)
 })
 
 test('normalizes only finite client fallback limits', () => {
-  assert.deepEqual(normalizeRemainingMacros({ calories: 500, protein: -10, carbs: '80', fat: Number.NaN }), {
-    calories: 500,
-    protein: 0,
-    carbs: null,
-    fat: null,
-  })
+  assert.deepEqual(normalizeRemainingMacros({ calories: 500, protein: -10, carbs: '80', fat: Number.NaN }), { calories: 500, protein: 0, carbs: null, fat: null })
   assert.equal(normalizeRemainingMacros(null), null)
 })
 
-test('preserves detailed requests with quotes, braces, slashes, newlines, and Unicode', () => {
+test('preserves detailed requests and serializes hard constraints in the prompt', () => {
   const details = 'Make it "crispy" with {heat}, C:\\recipes\nNo mustard — add jalapeño 🌶️'
   assert.equal(normalizeMealRequest(details), details)
-  const prompt = buildMealRecommendationPrompt({ ingredients: ['chicken'], remaining: null, mealRequest: details })
+  const prompt = buildMealRecommendationPrompt({ ingredients: ['chicken'], remaining: null, constraints: { oven: 'no-oven' }, mealRequest: details })
   assert.match(prompt, /jalapeño/)
+  assert.match(prompt, /no-oven/)
   assert.doesNotThrow(() => JSON.parse(prompt.match(/context: (\{.*\})\n\n/s)[1]))
 })
 
 test('rejects overlong meal specifics with a controlled client error', () => {
-  assert.throws(
-    () => normalizeMealRequest('x'.repeat(MAX_MEAL_REQUEST_LENGTH + 1)),
-    (error) => error instanceof MealRecommendationError && error.statusCode === 400,
-  )
+  assert.throws(() => normalizeMealRequest('x'.repeat(MAX_MEAL_REQUEST_LENGTH + 1)), (error) => error instanceof MealRecommendationError && error.statusCode === 400)
 })
 
 test('detects max-token truncation before attempting to parse output', () => {
-  assert.throws(
-    () => parseMealRecommendationResult({ stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"meals":[{"name":"cut off' }] }),
-    (error) => error instanceof MealRecommendationError && error.message === TRUNCATED_RECOMMENDATION_MESSAGE,
-  )
+  assert.throws(() => parseMealRecommendationResult({ stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"meals":[{"name":"cut off' }] }), (error) => error instanceof MealRecommendationError && error.message === TRUNCATED_RECOMMENDATION_MESSAGE)
 })
 
 test('returns controlled errors for refusals, missing output, and malformed structured text', () => {
-  assert.throws(
-    () => parseMealRecommendationResult({ stop_reason: 'refusal', content: [] }),
-    /could not be completed for that request/,
-  )
+  assert.throws(() => parseMealRecommendationResult({ stop_reason: 'refusal', content: [] }), /could not be completed for that request/)
   for (const result of [
     { stop_reason: 'end_turn', content: [] },
     { stop_reason: 'end_turn', content: [{ type: 'text', text: '{bad json' }] },
     { stop_reason: 'stop_sequence', content: [{ type: 'text', text: '{}' }] },
   ]) {
-    assert.throws(
-      () => parseMealRecommendationResult(result),
-      (error) => error instanceof MealRecommendationError && error.message === RETRY_RECOMMENDATION_MESSAGE,
-    )
+    assert.throws(() => parseMealRecommendationResult(result), (error) => error instanceof MealRecommendationError && error.message === RETRY_RECOMMENDATION_MESSAGE)
   }
 })
 

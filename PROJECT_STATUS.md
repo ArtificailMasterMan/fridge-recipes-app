@@ -72,6 +72,15 @@ Fridge images are uploaded temporarily to `/api/scan-fridge`, sent to Claude vis
 - Authenticated server-side account storage
 - Firestore database access through Firebase Admin
 - Black Lab/bulldog mascot with a patchy white chest and mismatched white paws
+- Category and A–Z kitchen-list views without changing saved ingredient data
+- Safe account-load recovery that blocks editing instead of presenting a false empty account
+- Sticky mobile-friendly quick navigation and food log beside the daily balance
+- Scan mode/file consistency, locked scan controls, and keyboard-accessible review dialog
+- Generated-meal prefilling for the food log with explicit review before saving
+- Structured meal preferences for time, effort, oven use, and flavor
+- Persistent private never-suggest foods enforced server-side
+- Ready-now versus required-ingredient meal labels and separate optional upgrades
+- Session-only Not-for-me feedback without an opaque automatic taste profile
 
 ## Current production test focus
 

@@ -1,26 +1,50 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signOut, type User } from 'firebase/auth'
 import { auth, firebaseConfigurationError } from './firebase'
+import { groupIngredients, sortIngredients } from './ingredient-organization.mjs'
 import dogMascot from './assets/dog-mascot.svg'
 import ravensLogo from './assets/ravens-logo.webp'
 import './App.css'
 
 type Macros = { calories: number; protein: number; carbs: number; fat: number }
-type Profile = Macros & { name: string }
+type Profile = Macros & { name: string; avoidedIngredients: string[] }
 type FoodEntry = Macros & { id: string; name: string; category: string; serving: string }
-type Meal = Macros & { name: string; timeMinutes: number | null; macroFit: string; inventory: string; whyItFits: string; missingIngredients: string[]; steps: string[] }
-type SavedRecipe = { id: string; name: string; source?: 'generated' | 'imported'; ingredients?: string[]; steps?: string[]; calories?: number; protein?: number; carbs?: number; fat?: number }
+type Meal = Macros & {
+  name: string
+  timeMinutes: number | null
+  macroFit: string
+  whyItFits: string
+  ingredients: string[]
+  requiredIngredients: string[]
+  optionalUpgrades: string[]
+  effort: 'minimal' | 'standard'
+  usesOven: boolean
+  flavorProfile: string
+  steps: string[]
+}
+type SavedRecipe = { id: string; name: string; source?: 'generated' | 'imported'; ingredients?: string[]; requiredIngredients?: string[]; optionalUpgrades?: string[]; steps?: string[]; calories?: number; protein?: number; carbs?: number; fat?: number }
 type DetectedIngredient = { id: string; name: string; confidence: 'high' | 'medium' | 'low'; note: string; keep: boolean }
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
-type AccountData = { profile: Profile | null; ingredients: string[]; entries: FoodEntry[]; savedRecipes: SavedRecipe[] }
+type StoredProfile = Omit<Profile, 'avoidedIngredients'> & { avoidedIngredients?: string[] }
+type AccountData = { profile: StoredProfile | null; ingredients: string[]; entries: FoodEntry[]; savedRecipes: SavedRecipe[] }
+type MealPreferences = { maxTime: number | null; effort: 'any' | 'minimal'; oven: 'any' | 'no-oven'; flavor: 'any' | 'savory' | 'spicy' | 'fresh' | 'comforting' }
+type RejectedMeal = { name: string; reason: string }
 
 const emptyMacros: Macros = { calories: 0, protein: 0, carbs: 0, fat: 0 }
-const emptyProfile: Profile = { name: '', ...emptyMacros }
+const emptyProfile: Profile = { name: '', avoidedIngredients: [], ...emptyMacros }
+const emptyMealPreferences: MealPreferences = { maxTime: null, effort: 'any', oven: 'any', flavor: 'any' }
 const number = (value: string) => Math.max(0, Number(value) || 0)
 const localDateKey = (value: Date) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
 const macroLine = (macros: Partial<Macros>) => `${Math.round(macros.calories || 0)} kcal · ${Math.round(macros.protein || 0)}P / ${Math.round(macros.carbs || 0)}C / ${Math.round(macros.fat || 0)}F`
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message.replace('Firebase: ', '') : fallback
 const cleanIngredient = (value: string) => value.trim().replace(/\s+/g, ' ')
+const savedIngredientView = () => {
+  try {
+    return window.localStorage.getItem('fridge-recipes-ingredient-view') === 'alphabetical' ? 'alphabetical' : 'category'
+  } catch {
+    return 'category'
+  }
+}
 const uniqueIngredients = (values: string[]) => {
   const seen = new Set<string>()
   return values.flatMap((value) => {
@@ -46,8 +70,10 @@ function App() {
   const [ingredients, setIngredients] = useState<string[]>([])
   const [savedRecipes, setSavedRecipes] = useState<SavedRecipe[]>([])
   const [dataLoading, setDataLoading] = useState(false)
+  const [dataReady, setDataReady] = useState(false)
   const [dataError, setDataError] = useState('')
   const [profileState, setProfileState] = useState<SaveState>('idle')
+  const [avoidState, setAvoidState] = useState<SaveState>('idle')
   const [profileError, setProfileError] = useState('')
   const [ingredientState, setIngredientState] = useState<SaveState>('idle')
   const [ingredientError, setIngredientError] = useState('')
@@ -55,6 +81,7 @@ function App() {
   const [foodError, setFoodError] = useState('')
   const [recipeState, setRecipeState] = useState<Record<string, SaveState>>({})
   const [ingredientInput, setIngredientInput] = useState('')
+  const [ingredientView, setIngredientView] = useState<'category' | 'alphabetical'>(savedIngredientView)
   const [ingredientEditing, setIngredientEditing] = useState(false)
   const [ingredientDraft, setIngredientDraft] = useState<string[]>([])
   const [selectedIngredients, setSelectedIngredients] = useState<Set<number>>(new Set())
@@ -67,8 +94,12 @@ function App() {
   const [scanFile, setScanFile] = useState<File | null>(null)
   const [scanCandidates, setScanCandidates] = useState<DetectedIngredient[]>([])
   const [scanReviewOpen, setScanReviewOpen] = useState(false)
+  const [reviewScanMode, setReviewScanMode] = useState<'fridge' | 'pantry'>('fridge')
   const [reviewInput, setReviewInput] = useState('')
   const [mealRequest, setMealRequest] = useState('A satisfying meal')
+  const [mealPreferences, setMealPreferences] = useState<MealPreferences>(emptyMealPreferences)
+  const [avoidInput, setAvoidInput] = useState('')
+  const [rejectedMeals, setRejectedMeals] = useState<RejectedMeal[]>([])
   const [meals, setMeals] = useState<Meal[]>([])
   const [mealState, setMealState] = useState<'idle' | 'loading' | 'error'>('idle')
   const [mealError, setMealError] = useState('')
@@ -78,6 +109,10 @@ function App() {
   const [importError, setImportError] = useState('')
   const libraryInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
+  const scanTriggerRef = useRef<HTMLButtonElement>(null)
+  const scanDialogRef = useRef<HTMLElement>(null)
+  const foodNameRef = useRef<HTMLInputElement>(null)
+  const ingredientStateRef = useRef<SaveState>('idle')
   const currentDate = localDateKey(clock)
 
   async function accountRequest<T>(method: 'GET' | 'POST', body?: Record<string, unknown>) {
@@ -94,19 +129,24 @@ function App() {
   }
 
   async function loadAccountData() {
-    if (!user) return
+    if (!user) return false
     setDataLoading(true)
     setDataError('')
     try {
       const data = await accountRequest<AccountData>('GET')
-      const nextProfile = data.profile || emptyProfile
+      const nextProfile: Profile = data.profile
+        ? { ...emptyProfile, ...data.profile, avoidedIngredients: uniqueIngredients(data.profile.avoidedIngredients || []) }
+        : emptyProfile
       setProfile(nextProfile)
       setProfileDraft(nextProfile)
       setIngredients(data.ingredients || [])
       setEntries(data.entries || [])
       setSavedRecipes(data.savedRecipes || [])
+      setDataReady(true)
+      return true
     } catch (error) {
       setDataError(errorMessage(error, 'Could not load your account data.'))
+      return false
     } finally {
       setDataLoading(false)
     }
@@ -128,7 +168,7 @@ function App() {
 
   useEffect(() => {
     const updateClock = () => setClock(new Date())
-    const timer = window.setInterval(updateClock, 1_000)
+    const timer = window.setInterval(updateClock, 30_000)
     window.addEventListener('focus', updateClock)
     document.addEventListener('visibilitychange', updateClock)
     return () => {
@@ -139,6 +179,8 @@ function App() {
   }, [])
 
   useEffect(() => {
+    setDataReady(false)
+    setDataError('')
     if (!user) {
       setProfile(emptyProfile)
       setProfileDraft(emptyProfile)
@@ -154,6 +196,66 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, currentDate])
 
+  useEffect(() => {
+    ingredientStateRef.current = ingredientState
+  }, [ingredientState])
+
+  useEffect(() => {
+    if (!scanReviewOpen) return
+
+    const previousOverflow = document.body.style.overflow
+    const trigger = scanTriggerRef.current
+    const background = Array.from(document.querySelectorAll<HTMLElement>('main > :not(.dialog-backdrop)'))
+    background.forEach((element) => {
+      element.setAttribute('inert', '')
+      element.setAttribute('aria-hidden', 'true')
+    })
+    document.body.style.overflow = 'hidden'
+    window.requestAnimationFrame(() => scanDialogRef.current?.focus())
+
+    const handleDialogKey = (event: KeyboardEvent) => {
+      const dialog = scanDialogRef.current
+      if (!dialog) return
+      if (event.key === 'Escape' && ingredientStateRef.current !== 'saving') {
+        event.preventDefault()
+        setScanReviewOpen(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])'))
+      if (!focusable.length) {
+        event.preventDefault()
+        dialog.focus()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleDialogKey)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      background.forEach((element) => {
+        element.removeAttribute('inert')
+        element.removeAttribute('aria-hidden')
+      })
+      document.removeEventListener('keydown', handleDialogKey)
+      trigger?.focus()
+    }
+  }, [scanReviewOpen])
+
+  useEffect(() => () => {
+    if (photo) URL.revokeObjectURL(photo)
+  }, [photo])
+
   const consumed = useMemo(() => entries.reduce<Macros>((total, entry) => ({
     calories: total.calories + entry.calories,
     protein: total.protein + entry.protein,
@@ -167,6 +269,17 @@ function App() {
     fat: profile.fat - consumed.fat,
   }), [profile, consumed])
   const targetSet = profile.calories > 0
+  const alphabeticalIngredients = useMemo(() => sortIngredients(ingredients), [ingredients])
+  const groupedIngredients = useMemo(() => groupIngredients(ingredients), [ingredients])
+
+  function changeIngredientView(view: 'category' | 'alphabetical') {
+    setIngredientView(view)
+    try {
+      window.localStorage.setItem('fridge-recipes-ingredient-view', view)
+    } catch {
+      // The selected view still works when browser storage is unavailable.
+    }
+  }
 
   async function submitAuth(event: React.FormEvent) {
     event.preventDefault()
@@ -184,6 +297,7 @@ function App() {
   }
 
   async function saveProfile() {
+    if (!dataReady) return
     setProfileState('saving')
     setProfileError('')
     try {
@@ -197,6 +311,7 @@ function App() {
   }
 
   async function saveIngredients(items: string[]) {
+    if (!dataReady) return false
     setIngredientState('saving')
     setIngredientError('')
     try {
@@ -253,7 +368,7 @@ function App() {
 
   async function addFood(event: React.FormEvent) {
     event.preventDefault()
-    if (!food.name.trim()) return
+    if (!dataReady || !food.name.trim()) return
     setFoodState('saving')
     setFoodError('')
     try {
@@ -268,7 +383,7 @@ function App() {
   }
 
   async function removeLast() {
-    if (!entries.length) return
+    if (!dataReady || !entries.length) return
     setFoodState('saving')
     setFoodError('')
     try {
@@ -282,6 +397,7 @@ function App() {
   }
 
   async function saveRecipe(meal: Meal) {
+    if (!dataReady) return
     setRecipeState((current) => ({ ...current, [meal.name]: 'saving' }))
     try {
       await accountRequest('POST', { action: 'save-recipe', recipe: meal })
@@ -295,7 +411,7 @@ function App() {
 
   async function importRecipe(event: React.FormEvent) {
     event.preventDefault()
-    if (!recipeUrl.trim() || !user) return
+    if (!recipeUrl.trim() || !user || !dataReady) return
     setImportState('saving')
     setImportError('')
     try {
@@ -317,6 +433,7 @@ function App() {
   }
 
   async function removeRecipe(recipeId: string) {
+    if (!dataReady) return
     try {
       await accountRequest('POST', { action: 'remove-recipe', recipeId })
       await loadAccountData()
@@ -325,24 +442,41 @@ function App() {
     }
   }
 
+  function clearPhotoSelection() {
+    setScanFile(null)
+    setPhoto((current) => {
+      if (current) URL.revokeObjectURL(current)
+      return null
+    })
+  }
+
+  function changeScanMode(mode: 'fridge' | 'pantry') {
+    if (scanState === 'loading' || mode === scanMode) return
+    clearPhotoSelection()
+    setScanMode(mode)
+    setScanError('')
+    setScanState('idle')
+  }
+
   function selectPhoto(file?: File) {
+    if (scanState === 'loading') return
     setScanError('')
     setScanState('idle')
     if (!file) return
     if (file.size > 8 * 1024 * 1024) {
-      setScanFile(null)
+      clearPhotoSelection()
       setScanState('error')
       setScanError('Choose an image smaller than 8 MB.')
       return
     }
     if (['image/heic', 'image/heif'].includes(file.type) || /\.hei[cf]$/i.test(file.name)) {
-      setScanFile(null)
+      clearPhotoSelection()
       setScanState('error')
       setScanError('HEIC photos are not supported yet. Choose a JPEG/PNG or upload an iPhone screenshot.')
       return
     }
     if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type)) {
-      setScanFile(null)
+      clearPhotoSelection()
       setScanState('error')
       setScanError('Choose a JPG, PNG, WEBP, or GIF image.')
       return
@@ -355,12 +489,13 @@ function App() {
   }
 
   async function scanPhoto() {
-    if (!scanFile || !user) return
+    if (!scanFile || !user || !dataReady) return
+    const requestedMode = scanMode
     setScanState('loading')
     setScanError('')
     const body = new FormData()
     body.append('image', scanFile)
-    body.append('mode', scanMode)
+    body.append('mode', requestedMode)
     try {
       const token = await user.getIdToken()
       const response = await fetch('/api/scan-fridge', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body })
@@ -374,6 +509,7 @@ function App() {
         keep: true,
       })).filter((item: DetectedIngredient) => item.name) : []
       setScanCandidates(candidates)
+      setReviewScanMode(data.mode === 'pantry' ? 'pantry' : requestedMode)
       setReviewInput('')
       setScanReviewOpen(true)
       setScanState('idle')
@@ -401,8 +537,51 @@ function App() {
     }
   }
 
+  async function saveAvoidances() {
+    if (!dataReady) return
+    setAvoidState('saving')
+    setProfileError('')
+    try {
+      const avoidedIngredients = uniqueIngredients(profileDraft.avoidedIngredients)
+      await accountRequest('POST', { action: 'save-avoidances', avoidedIngredients })
+      if (await loadAccountData()) setAvoidState('saved')
+    } catch (error) {
+      setAvoidState('error')
+      setProfileError(errorMessage(error, 'Could not save never-suggest foods.'))
+    }
+  }
+
+  function addAvoidance() {
+    const clean = cleanIngredient(avoidInput)
+    if (!clean || profileDraft.avoidedIngredients.some((item) => item.toLowerCase() === clean.toLowerCase())) return
+    setProfileDraft((current) => ({ ...current, avoidedIngredients: [...current.avoidedIngredients, clean] }))
+    setAvoidInput('')
+    setAvoidState('idle')
+  }
+
+  function prefillMealLog(meal: Meal) {
+    setFood({
+      name: meal.name,
+      category: 'Dinner',
+      serving: '1 estimated serving',
+      calories: meal.calories,
+      protein: meal.protein,
+      carbs: meal.carbs,
+      fat: meal.fat,
+    })
+    setFoodState('idle')
+    window.location.hash = 'food-log'
+    window.requestAnimationFrame(() => foodNameRef.current?.focus())
+  }
+
+  function rejectMeal(meal: Meal, reason: string) {
+    setRejectedMeals((current) => current.some((item) => item.name === meal.name) ? current : [...current, { name: meal.name, reason }])
+    setMeals((current) => current.filter((item) => item.name !== meal.name))
+    setMealMessage(`Got it — “${meal.name}” was removed. Your next search will avoid that meal.`)
+  }
+
   async function getMeals() {
-    if (!ingredients.length || !user) return
+    if (!ingredients.length || !user || !dataReady) return
     setMealState('loading')
     setMealError('')
     setMealMessage('')
@@ -412,7 +591,15 @@ function App() {
       const response = await fetch('/api/recommend-meals', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ ingredients, remaining: targetSet ? remaining : null, mealRequest, currentDate }),
+        body: JSON.stringify({
+          ingredients,
+          remaining: targetSet ? remaining : null,
+          mealRequest,
+          currentDate,
+          preferences: mealPreferences,
+          avoidedIngredients: profile.avoidedIngredients,
+          rejectedMeals: rejectedMeals.map((item) => item.name),
+        }),
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.error || 'Could not make recommendations.')
@@ -433,6 +620,7 @@ function App() {
 
   return <main>
     <header className="topbar"><a className="brand" href="#top"><span>fridge</span>recipes</a><div className="account"><span>{user.email}</span><button className="text-button" type="button" onClick={() => auth && void signOut(auth)}>Sign out</button></div></header>
+    <nav className="quick-nav" aria-label="Quick navigation"><a href="#today">Today</a><a href="#food-log">Food log</a><a href="#scan-your-kitchen">Scan</a><a href="#kitchen-list">Kitchen</a><a href="#meal-ideas">Meals</a><a href="#saved-recipes">Saved</a></nav>
     <section className="hero" id="top">
       <div className="hero-copy">
         <p className="eyebrow">YOUR KITCHEN, SIMPLIFIED</p>
@@ -470,22 +658,41 @@ function App() {
         <span className="leaf">✦</span>
       </div>
     </section>
-    {dataError && <p className="error save-notice">{dataError}</p>}
-    {dataLoading ? <p className="loading">Loading your private kitchen…</p> : <>
-      <section className="dashboard"><div className="section-title"><div><p className="eyebrow">TODAY’S BALANCE</p><h2>{targetSet ? 'Your daily targets' : 'Set your daily targets'}</h2></div><div className="clock"><strong>{new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(clock)}</strong><span>{new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(clock)}</span></div></div><div className="macro-grid">{(['calories', 'protein', 'carbs', 'fat'] as const).map((key) => <div className="macro-card" key={key}><span>{key === 'calories' ? 'Calories' : key[0].toUpperCase() + key.slice(1)}</span><strong>{targetSet ? Math.round(remaining[key]) : '—'}</strong><small>{targetSet ? `left of ${Math.round(profile[key])}${key === 'calories' ? ' kcal' : 'g'}` : key === 'calories' ? 'kcal target' : 'grams target'}</small></div>)}</div><details className="profile-panel" open={!targetSet}><summary>{targetSet ? `Edit ${profile.name || 'macro'} targets` : 'Set up your targets'}</summary><div className="form-grid profile-form"><label>Profile name<input value={profileDraft.name} onChange={(event) => { setProfileDraft({ ...profileDraft, name: event.target.value }); setProfileState('idle') }} placeholder="My goals" /></label>{(['calories', 'protein', 'carbs', 'fat'] as const).map((key) => <label key={key}>{key === 'calories' ? 'Calories' : key[0].toUpperCase() + key.slice(1) + ' (g)'}<input type="number" min="0" value={profileDraft[key] || ''} onChange={(event) => { setProfileDraft({ ...profileDraft, [key]: number(event.target.value) }); setProfileState('idle') }} /></label>)}</div><div className="save-row"><button className="primary" type="button" disabled={profileState === 'saving'} onClick={() => void saveProfile()}>{profileState === 'saving' ? 'Saving targets…' : 'Save targets'}</button>{profileState === 'saved' && <span className="saved">Targets saved to your account.</span>}</div>{profileError && <p className="error">{profileError}</p>}<p className="fine-print">Daily food totals start fresh at local midnight. Your saved targets stay in place. Nutrition is a planning estimate, not medical advice.</p></details></section>
+    {dataError && dataReady && <p className="error save-notice" role="alert">Your last change may have succeeded, but fresh account data could not be loaded. The data already on screen has been kept. {dataError}</p>}
+    {dataLoading && !dataReady ? <p className="loading" role="status">Loading your private kitchen…</p> : !dataReady ? <section className="load-recovery" role="alert"><p className="eyebrow">ACCOUNT DATA UNAVAILABLE</p><h2>Your kitchen is protected.</h2><p>We could not safely load your saved account, so editing is paused instead of showing an empty kitchen.</p>{dataError && <p className="error">{dataError}</p>}<button className="primary" type="button" disabled={dataLoading} onClick={() => void loadAccountData()}>{dataLoading ? 'Trying again…' : 'Retry loading'}</button></section> : <>
+      <section className="dashboard" id="today"><div className="section-title"><div><p className="eyebrow">TODAY’S BALANCE</p><h2>{targetSet ? 'Your daily targets' : 'Set your daily targets'}</h2></div><div className="clock"><strong>{new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(clock)}</strong><span>{new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(clock)}</span></div></div><div className="macro-grid">{(['calories', 'protein', 'carbs', 'fat'] as const).map((key) => <div className="macro-card" key={key}><span>{key === 'calories' ? 'Calories' : key[0].toUpperCase() + key.slice(1)}</span><strong>{targetSet ? Math.round(remaining[key]) : '—'}</strong><small>{targetSet ? `left of ${Math.round(profile[key])}${key === 'calories' ? ' kcal' : 'g'}` : key === 'calories' ? 'kcal target' : 'grams target'}</small></div>)}</div><details className="profile-panel" open={!targetSet}><summary>{targetSet ? `Edit ${profile.name || 'macro'} targets` : 'Set up your targets'}</summary><div className="form-grid profile-form"><label>Profile name<input value={profileDraft.name} onChange={(event) => { setProfileDraft({ ...profileDraft, name: event.target.value }); setProfileState('idle') }} placeholder="My goals" /></label>{(['calories', 'protein', 'carbs', 'fat'] as const).map((key) => <label key={key}>{key === 'calories' ? 'Calories' : key[0].toUpperCase() + key.slice(1) + ' (g)'}<input type="number" min="0" value={profileDraft[key] || ''} onChange={(event) => { setProfileDraft({ ...profileDraft, [key]: number(event.target.value) }); setProfileState('idle') }} /></label>)}</div><div className="save-row"><button className="primary" type="button" disabled={profileState === 'saving'} onClick={() => void saveProfile()}>{profileState === 'saving' ? 'Saving targets…' : 'Save targets'}</button>{profileState === 'saved' && <span className="saved">Targets saved to your account.</span>}</div>{profileError && <p className="error">{profileError}</p>}<p className="fine-print">Daily food totals start fresh at local midnight. Your saved targets stay in place. Nutrition is a planning estimate, not medical advice.</p></details></section>
 
-      <section className="photo-section" id="scan-your-kitchen"><div className="section-title"><div><p className="eyebrow">START WITH A PHOTO</p><h2>What’s in your kitchen?</h2></div><span className="step">01</span></div><p className="section-copy">Take a photo or choose one from your camera roll. Review every result before anything is saved.</p><div className="scan-mode" role="group" aria-label="Photo location"><button type="button" className={scanMode === 'fridge' ? 'active' : ''} onClick={() => setScanMode('fridge')}>Fridge</button><button type="button" className={scanMode === 'pantry' ? 'active' : ''} onClick={() => setScanMode('pantry')}>Pantry</button></div><div className="photo-layout"><div className="upload-zone photo-picker">{photo ? <img src={photo} alt={`Selected ${scanMode}`} /> : <><span className="camera">⌑</span><strong>Add a {scanMode} photo</strong><small>JPG, PNG, WEBP · up to 8 MB</small></>}<div className="photo-buttons"><button className="secondary" type="button" onClick={() => cameraInputRef.current?.click()}>Take photo</button><button className="secondary" type="button" onClick={() => libraryInputRef.current?.click()}>Choose from library</button></div>{scanFile && <small className="selected-file">Selected: {scanFile.name}</small>}</div><input ref={cameraInputRef} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={(event) => { selectPhoto(event.target.files?.[0]); event.target.value = '' }} /><input ref={libraryInputRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.gif,.heic,.heif" onChange={(event) => { selectPhoto(event.target.files?.[0]); event.target.value = '' }} /><div className="photo-action"><h3>{scanMode === 'pantry' ? 'Shelf-by-shelf scan' : 'Photo-first planning'}</h3><p>{scanMode === 'pantry' ? 'We inspect visible cans, jars, boxes, bags, and labels without guessing hidden contents.' : 'The scan does not save your photo. You decide what ingredients are included.'}</p><button className="primary" type="button" disabled={!scanFile || scanState === 'loading'} onClick={() => void scanPhoto()}>{scanState === 'loading' ? `Scanning ${scanMode}…` : 'Scan photo'}</button>{scanError && <p className="error">{scanError}</p>}<small>Nothing is added to your private kitchen until you confirm it.</small></div></div></section>
+      <section className="log-section" id="food-log"><div className="section-title"><div><p className="eyebrow">LOG WHAT YOU EAT</p><h2>Today’s food log</h2></div></div><form onSubmit={(event) => void addFood(event)} className="food-form"><p className="form-note">Generated meal nutrition is an estimate. Review and edit every value before saving.</p><div className="form-grid"><label>Food or meal<input ref={foodNameRef} required value={food.name} onChange={(event) => setFood({ ...food, name: event.target.value })} placeholder="Protein shake" /></label><label>Meal<select value={food.category} onChange={(event) => setFood({ ...food, category: event.target.value })}>{['Breakfast', 'Lunch', 'Dinner', 'Snack', 'Other'].map((item) => <option key={item}>{item}</option>)}</select></label><label>Serving<input value={food.serving} onChange={(event) => setFood({ ...food, serving: event.target.value })} placeholder="1 bottle" /></label>{(['calories', 'protein', 'carbs', 'fat'] as const).map((key) => <label key={key}>{key === 'calories' ? 'Calories' : key[0].toUpperCase() + key.slice(1) + ' (g)'}<input type="number" min="0" value={food[key] || ''} onChange={(event) => setFood({ ...food, [key]: number(event.target.value) })} /></label>)}</div><div className="save-row"><button className="primary" type="submit" disabled={foodState === 'saving'}>{foodState === 'saving' ? 'Saving entry…' : 'Add to today'}</button>{foodState === 'saved' && <span className="saved" role="status">Food log saved.</span>}</div>{foodError && <p className="error" role="alert">{foodError}</p>}</form><div className="log-head"><h3>Today’s entries</h3><button className="text-button" type="button" disabled={!entries.length || foodState === 'saving'} onClick={() => void removeLast()}>Undo last entry</button></div>{entries.length ? <div className="entries">{entries.map((entry) => <div className="entry" key={entry.id}><div><strong>{entry.name}</strong><span>{entry.category}{entry.serving ? ` · ${entry.serving}` : ''}</span></div><p>{macroLine(entry)}</p></div>)}</div> : <p className="empty">Nothing logged for {new Intl.DateTimeFormat(undefined, { month: 'long', day: 'numeric' }).format(clock)} yet.</p>}</section>
 
-      <section className="ingredients-section"><div className="section-title"><div><p className="eyebrow">CONFIRM YOUR INGREDIENTS</p><h2>Your kitchen list</h2></div><span className="step">02</span></div><div className="ingredient-box">{ingredientEditing ? <><div className="bulk-toolbar"><button className="secondary" type="button" onClick={() => setSelectedIngredients(selectedIngredients.size === ingredientDraft.length ? new Set() : new Set(ingredientDraft.map((_, index) => index)))}>{selectedIngredients.size === ingredientDraft.length && ingredientDraft.length ? 'Clear selection' : 'Select all'}</button><button className="danger-button" type="button" disabled={!selectedIngredients.size} onClick={deleteSelectedIngredients}>Delete selected ({selectedIngredients.size})</button></div><div className="ingredient-editor">{ingredientDraft.map((ingredient, index) => <div className="ingredient-row" key={index}><input className="row-check" type="checkbox" aria-label={`Select ${ingredient || `ingredient ${index + 1}`}`} checked={selectedIngredients.has(index)} onChange={() => toggleIngredientSelection(index)} /><input aria-label={`Edit ingredient ${index + 1}`} value={ingredient} onChange={(event) => setIngredientDraft((current) => current.map((item, itemIndex) => itemIndex === index ? event.target.value : item))} /></div>)}</div><button className="text-button add-row" type="button" onClick={() => setIngredientDraft((current) => [...current, ''])}>+ Add another row</button><div className="save-row"><button className="primary" type="button" disabled={ingredientState === 'saving'} onClick={() => void confirmIngredientEdits()}>{ingredientState === 'saving' ? 'Saving changes…' : 'Save changes'}</button><button className="secondary" type="button" disabled={ingredientState === 'saving'} onClick={() => { setIngredientEditing(false); setSelectedIngredients(new Set()) }}>Cancel</button></div></> : <><div className="ingredient-head"><div className="chips">{ingredients.length ? ingredients.map((ingredient) => <span className="chip" key={ingredient}>{ingredient}</span>) : <p className="empty">Add ingredients below, or scan a fridge or pantry photo first.</p>}</div><button className="text-button" type="button" onClick={startIngredientEditing}>Edit list</button></div><div className="add-ingredient"><input value={ingredientInput} onChange={(event) => setIngredientInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void addIngredient() } }} placeholder="Add chicken, rice, broccoli…" /><button className="secondary" type="button" disabled={ingredientState === 'saving'} onClick={() => void addIngredient()}>{ingredientState === 'saving' ? 'Saving…' : 'Add'}</button></div>{scanAdditions.length > 0 && <button className="text-button undo-scan" type="button" disabled={ingredientState === 'saving'} onClick={() => void undoScanAdditions()}>Undo last scan additions ({scanAdditions.length})</button>}</>}{ingredientState === 'saved' && <p className="saved">Kitchen list saved.</p>}{ingredientError && <p className="error">{ingredientError}</p>}</div></section>
+      <section className="photo-section" id="scan-your-kitchen"><div className="section-title"><div><p className="eyebrow">START WITH A PHOTO</p><h2>What’s in your kitchen?</h2></div><span className="step">01</span></div><p className="section-copy">Take a photo or choose one from your camera roll. Review every result before anything is saved.</p><div className="scan-mode" role="group" aria-label="Photo location"><button type="button" disabled={scanState === 'loading'} aria-pressed={scanMode === 'fridge'} className={scanMode === 'fridge' ? 'active' : ''} onClick={() => changeScanMode('fridge')}>Fridge</button><button type="button" disabled={scanState === 'loading'} aria-pressed={scanMode === 'pantry'} className={scanMode === 'pantry' ? 'active' : ''} onClick={() => changeScanMode('pantry')}>Pantry</button></div><div className="photo-layout"><div className="upload-zone photo-picker">{photo ? <img src={photo} alt={`Selected ${scanMode}`} /> : <><span className="camera">⌑</span><strong>Add a {scanMode} photo</strong><small>JPG, PNG, WEBP · up to 8 MB</small></>}<div className="photo-buttons"><button className="secondary" type="button" disabled={scanState === 'loading'} onClick={() => cameraInputRef.current?.click()}>Take photo</button><button className="secondary" type="button" disabled={scanState === 'loading'} onClick={() => libraryInputRef.current?.click()}>Choose from library</button></div>{scanFile && <small className="selected-file">Selected: {scanFile.name}</small>}</div><input ref={cameraInputRef} disabled={scanState === 'loading'} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={(event) => { selectPhoto(event.target.files?.[0]); event.target.value = '' }} /><input ref={libraryInputRef} disabled={scanState === 'loading'} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.gif,.heic,.heif" onChange={(event) => { selectPhoto(event.target.files?.[0]); event.target.value = '' }} /><div className="photo-action"><h3>{scanMode === 'pantry' ? 'Shelf-by-shelf scan' : 'Photo-first planning'}</h3><p>{scanMode === 'pantry' ? 'We inspect visible cans, jars, boxes, bags, and labels without guessing hidden contents.' : 'The scan does not save your photo. You decide what ingredients are included.'}</p><button ref={scanTriggerRef} className="primary" type="button" disabled={!scanFile || scanState === 'loading'} onClick={() => void scanPhoto()}>{scanState === 'loading' ? `Scanning ${scanMode}…` : 'Scan photo'}</button>{scanError && <p className="error" role="alert">{scanError}</p>}<small>Nothing is added to your private kitchen until you confirm it.</small></div></div></section>
 
-      <section className="recommend-section"><div className="section-title"><div><p className="eyebrow">MAKE A PLAN</p><h2>Meal ideas for right now</h2></div><span className="step">03</span></div><div className="recommend-control"><input value={mealRequest} onChange={(event) => setMealRequest(event.target.value)} placeholder="What do you want to make?" /><button className="primary" type="button" disabled={!ingredients.length || mealState === 'loading'} onClick={() => void getMeals()}>{mealState === 'loading' ? 'Thinking…' : 'Find meals'}</button></div>{mealError && <p className="error">{mealError}</p>}{mealMessage && <p className="meal-message" role="status">{mealMessage}</p>}{meals.length > 0 && <div className="meal-grid">{meals.map((meal) => <article className="meal-card" key={meal.name}><p className="fit">{meal.macroFit}</p><h3>{meal.name}</h3><p className="meal-macros">{macroLine(meal)}</p><p className="meal-detail">{meal.timeMinutes ? `${meal.timeMinutes} min` : 'Quick meal'} · {meal.inventory}</p><p>{meal.whyItFits}</p>{meal.missingIngredients.length > 0 && <p className="missing"><b>Optional:</b> {meal.missingIngredients.join(', ')}</p>}<ol>{meal.steps.map((step) => <li key={step}>{step}</li>)}</ol><button className="secondary recipe-save" type="button" disabled={recipeState[meal.name] === 'saving' || recipeState[meal.name] === 'saved'} onClick={() => void saveRecipe(meal)}>{recipeState[meal.name] === 'saving' ? 'Saving recipe…' : recipeState[meal.name] === 'saved' ? 'Recipe saved' : 'Save recipe'}</button><small>Nutrition is estimated.</small></article>)}</div>}</section>
+      <section className="ingredients-section" id="kitchen-list"><div className="section-title"><div><p className="eyebrow">CONFIRM YOUR INGREDIENTS</p><h2>Your kitchen list</h2></div><span className="step">02</span></div><div className="ingredient-box">{ingredientEditing ? <><div className="bulk-toolbar"><button className="secondary" type="button" onClick={() => setSelectedIngredients(selectedIngredients.size === ingredientDraft.length ? new Set() : new Set(ingredientDraft.map((_, index) => index)))}>{selectedIngredients.size === ingredientDraft.length && ingredientDraft.length ? 'Clear selection' : 'Select all'}</button><button className="danger-button" type="button" disabled={!selectedIngredients.size} onClick={deleteSelectedIngredients}>Delete selected ({selectedIngredients.size})</button></div><div className="ingredient-editor">{ingredientDraft.map((ingredient, index) => <div className="ingredient-row" key={index}><input className="row-check" type="checkbox" aria-label={`Select ${ingredient || `ingredient ${index + 1}`}`} checked={selectedIngredients.has(index)} onChange={() => toggleIngredientSelection(index)} /><input aria-label={`Edit ingredient ${index + 1}`} value={ingredient} onChange={(event) => setIngredientDraft((current) => current.map((item, itemIndex) => itemIndex === index ? event.target.value : item))} /></div>)}</div><button className="text-button add-row" type="button" onClick={() => setIngredientDraft((current) => [...current, ''])}>+ Add another row</button><div className="save-row"><button className="primary" type="button" disabled={ingredientState === 'saving'} onClick={() => void confirmIngredientEdits()}>{ingredientState === 'saving' ? 'Saving changes…' : 'Save changes'}</button><button className="secondary" type="button" disabled={ingredientState === 'saving'} onClick={() => { setIngredientEditing(false); setSelectedIngredients(new Set()) }}>Cancel</button></div></> : <><div className="ingredient-display-toolbar"><div className="ingredient-view-toggle" role="group" aria-label="Organize kitchen list"><button type="button" className={ingredientView === 'category' ? 'active' : ''} aria-pressed={ingredientView === 'category'} onClick={() => changeIngredientView('category')}>Category</button><button type="button" className={ingredientView === 'alphabetical' ? 'active' : ''} aria-pressed={ingredientView === 'alphabetical'} onClick={() => changeIngredientView('alphabetical')}>A–Z</button></div><button className="text-button" type="button" onClick={startIngredientEditing}>Edit list</button></div>{ingredients.length ? ingredientView === 'category' ? <div className="ingredient-groups">{groupedIngredients.map((group) => <section className="ingredient-group" key={group.category}><h3>{group.category}<span>{group.ingredients.length}</span></h3><div className="chips">{group.ingredients.map((ingredient) => <span className="chip" key={ingredient}>{ingredient}</span>)}</div></section>)}</div> : <div className="chips alphabetical-chips">{alphabeticalIngredients.map((ingredient) => <span className="chip" key={ingredient}>{ingredient}</span>)}</div> : <p className="empty">Add ingredients below, or scan a fridge or pantry photo first.</p>}<label className="field-label" htmlFor="manual-ingredient">Add an ingredient</label><div className="add-ingredient"><input id="manual-ingredient" value={ingredientInput} onChange={(event) => setIngredientInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void addIngredient() } }} placeholder="Add chicken, rice, broccoli…" /><button className="secondary" type="button" disabled={ingredientState === 'saving'} onClick={() => void addIngredient()}>{ingredientState === 'saving' ? 'Saving…' : 'Add'}</button></div>{scanAdditions.length > 0 && <button className="text-button undo-scan" type="button" disabled={ingredientState === 'saving'} onClick={() => void undoScanAdditions()}>Undo last scan additions ({scanAdditions.length})</button>}</>}{ingredientState === 'saved' && <p className="saved">Kitchen list saved.</p>}{ingredientError && <p className="error">{ingredientError}</p>}</div></section>
 
-      <section className="saved-section"><div className="section-title"><div><p className="eyebrow">KEEP THE GOOD ONES</p><h2>Saved recipes</h2></div><span className="step">04</span></div><form className="recipe-import" onSubmit={(event) => void importRecipe(event)}><div><h3>Import from a recipe website</h3><p>We save only the recipe name, ingredients, and instructions—not the surrounding article.</p></div><div className="import-control"><input type="url" required value={recipeUrl} onChange={(event) => { setRecipeUrl(event.target.value); setImportState('idle') }} placeholder="https://example.com/recipe" /><button className="secondary" type="submit" disabled={importState === 'saving'}>{importState === 'saving' ? 'Importing…' : 'Import recipe'}</button></div>{importState === 'saved' && <p className="saved">Recipe imported to your account.</p>}{importError && <p className="error">{importError}</p>}</form>{savedRecipes.length ? <div className="saved-recipes">{savedRecipes.map((recipe) => <article className="saved-recipe" key={recipe.id}><div className="saved-recipe-head"><div><p className="recipe-source">{recipe.source === 'imported' ? 'IMPORTED RECIPE' : 'SAVED MEAL'}</p><h3>{recipe.name}</h3>{recipe.source !== 'imported' && <p>{macroLine(recipe)}</p>}</div><button className="text-button" type="button" onClick={() => void removeRecipe(recipe.id)}>Remove</button></div><details><summary>View recipe</summary>{recipe.ingredients?.length ? <><h4>Ingredients</h4><ul>{recipe.ingredients.map((ingredient) => <li key={ingredient}>{ingredient}</li>)}</ul></> : null}{recipe.steps?.length ? <><h4>Instructions</h4><ol>{recipe.steps.map((step) => <li key={step}>{step}</li>)}</ol></> : <p className="empty">This older saved meal has no stored instructions.</p>}</details></article>)}</div> : <p className="empty">Save a meal idea or import a recipe you want to make again.</p>}</section>
+      <section className="recommend-section" id="meal-ideas">
+        <div className="section-title"><div><p className="eyebrow">MAKE A PLAN</p><h2>Meal ideas for right now</h2></div><span className="step">03</span></div>
+        <div className="meal-preferences">
+          <div className="preference-grid">
+            <label>Maximum time<select value={mealPreferences.maxTime || ''} onChange={(event) => setMealPreferences({ ...mealPreferences, maxTime: event.target.value ? Number(event.target.value) : null })}><option value="">Any time</option><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="45">45 minutes</option><option value="60">60 minutes</option></select></label>
+            <label>Effort<select value={mealPreferences.effort} onChange={(event) => setMealPreferences({ ...mealPreferences, effort: event.target.value as MealPreferences['effort'] })}><option value="any">Any effort</option><option value="minimal">Minimal effort</option></select></label>
+            <label>Equipment<select value={mealPreferences.oven} onChange={(event) => setMealPreferences({ ...mealPreferences, oven: event.target.value as MealPreferences['oven'] })}><option value="any">Oven is okay</option><option value="no-oven">No oven</option></select></label>
+            <label>Flavor<select value={mealPreferences.flavor} onChange={(event) => setMealPreferences({ ...mealPreferences, flavor: event.target.value as MealPreferences['flavor'] })}><option value="any">Any flavor</option><option value="savory">Savory</option><option value="spicy">Spicy</option><option value="fresh">Fresh</option><option value="comforting">Comforting</option></select></label>
+          </div>
+          <details className="avoid-panel"><summary>Never suggest foods</summary><p>Saved privately to your account and enforced as a hard filter.</p><div className="chips">{profileDraft.avoidedIngredients.map((ingredient) => <button className="avoid-chip" type="button" key={ingredient} aria-label={`Remove ${ingredient} from never suggest foods`} onClick={() => { setProfileDraft((current) => ({ ...current, avoidedIngredients: current.avoidedIngredients.filter((item) => item !== ingredient) })); setAvoidState('idle') }}>{ingredient}<span aria-hidden="true"> ×</span></button>)}</div><label className="field-label" htmlFor="avoid-food">Food to never suggest</label><div className="avoid-control"><input id="avoid-food" value={avoidInput} onChange={(event) => setAvoidInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addAvoidance() } }} placeholder="For example: mushrooms" /><button className="secondary" type="button" onClick={addAvoidance}>Add</button><button className="primary" type="button" disabled={avoidState === 'saving'} onClick={() => void saveAvoidances()}>{avoidState === 'saving' ? 'Saving…' : 'Save list'}</button></div>{avoidState === 'saved' && <p className="saved" role="status">Never-suggest foods saved.</p>}</details>
+        </div>
+        <label className="field-label" htmlFor="meal-request">Meal specifics</label><div className="recommend-control"><input id="meal-request" value={mealRequest} onChange={(event) => setMealRequest(event.target.value)} placeholder="What do you want to make?" /><button className="primary" type="button" disabled={!ingredients.length || mealState === 'loading'} onClick={() => void getMeals()}>{mealState === 'loading' ? 'Thinking…' : 'Find meals'}</button></div>
+        {!ingredients.length && <p className="meal-message">Add or confirm at least one kitchen ingredient before finding meals.</p>}
+        {ingredients.length > 0 && !targetSet && mealState === 'idle' && !meals.length && !mealMessage && <p className="meal-message">You can search now. Set daily targets above if you also want hard macro limits.</p>}
+        {ingredients.length > 0 && targetSet && mealState === 'idle' && !meals.length && !mealMessage && <p className="meal-message">Ready when you are. We’ll check every result against your remaining macros and meal choices.</p>}
+        {mealState === 'loading' && <p className="meal-message" role="status">Looking for cohesive meals that match your kitchen and choices…</p>}
+        {mealError && <p className="error" role="alert">{mealError}</p>}{mealMessage && <p className="meal-message" role="status">{mealMessage}</p>}
+        {rejectedMeals.length > 0 && <p className="session-feedback">Avoiding this session: {rejectedMeals.map((item) => `${item.name} (${item.reason.toLowerCase()})`).join(', ')}.</p>}
+        {meals.length > 0 && <div className="meal-grid">{meals.map((meal) => <article className="meal-card" key={meal.name}><div className={`availability ${meal.requiredIngredients.length ? 'needs' : 'ready'}`}>{meal.requiredIngredients.length ? 'Needs ingredients' : 'Ready now'}</div><p className="fit">{meal.macroFit}</p><h3>{meal.name}</h3><p className="meal-macros">{macroLine(meal)}</p><p className="meal-detail">{meal.timeMinutes ? `${meal.timeMinutes} min` : 'Time varies'} · {meal.effort === 'minimal' ? 'Minimal effort' : 'Standard effort'} · {meal.usesOven ? 'Uses oven' : 'No oven'}</p><p>{meal.whyItFits}</p><p className="meal-ingredients"><b>Uses:</b> {meal.ingredients.join(', ')}</p>{meal.requiredIngredients.length > 0 && <p className="required"><b>Required:</b> {meal.requiredIngredients.join(', ')}</p>}{meal.optionalUpgrades.length > 0 && <p className="missing"><b>Optional upgrades:</b> {meal.optionalUpgrades.join(', ')}</p>}<ol>{meal.steps.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}</ol><div className="meal-actions"><button className="secondary" type="button" onClick={() => prefillMealLog(meal)}>Log this meal</button><button className="secondary recipe-save" type="button" disabled={recipeState[meal.name] === 'saving' || recipeState[meal.name] === 'saved'} onClick={() => void saveRecipe(meal)}>{recipeState[meal.name] === 'saving' ? 'Saving recipe…' : recipeState[meal.name] === 'saved' ? 'Recipe saved' : 'Save recipe'}</button></div><details className="reject-control"><summary>Not for me</summary><div><button type="button" className="text-button" onClick={() => rejectMeal(meal, 'Not appetizing')}>Not appetizing</button><button type="button" className="text-button" onClick={() => rejectMeal(meal, 'Too much work')}>Too much work</button><button type="button" className="text-button" onClick={() => rejectMeal(meal, 'Wrong flavor')}>Wrong flavor</button></div></details><small>Nutrition is estimated. Review it before logging.</small></article>)}</div>}
+      </section>
 
-      <section className="log-section"><div className="section-title"><div><p className="eyebrow">LOG WHAT YOU EAT</p><h2>Today’s food log</h2></div><span className="step">05</span></div><form onSubmit={(event) => void addFood(event)} className="food-form"><div className="form-grid"><label>Food or meal<input required value={food.name} onChange={(event) => setFood({ ...food, name: event.target.value })} placeholder="Protein shake" /></label><label>Meal<select value={food.category} onChange={(event) => setFood({ ...food, category: event.target.value })}>{['Breakfast', 'Lunch', 'Dinner', 'Snack', 'Other'].map((item) => <option key={item}>{item}</option>)}</select></label><label>Serving<input value={food.serving} onChange={(event) => setFood({ ...food, serving: event.target.value })} placeholder="1 bottle" /></label>{(['calories', 'protein', 'carbs', 'fat'] as const).map((key) => <label key={key}>{key === 'calories' ? 'Calories' : key[0].toUpperCase() + key.slice(1) + ' (g)'}<input type="number" min="0" value={food[key] || ''} onChange={(event) => setFood({ ...food, [key]: number(event.target.value) })} /></label>)}</div><div className="save-row"><button className="primary" type="submit" disabled={foodState === 'saving'}>{foodState === 'saving' ? 'Saving entry…' : 'Add to today'}</button>{foodState === 'saved' && <span className="saved">Food log saved.</span>}</div>{foodError && <p className="error">{foodError}</p>}</form><div className="log-head"><h3>Today’s entries</h3><button className="text-button" type="button" disabled={!entries.length || foodState === 'saving'} onClick={() => void removeLast()}>Undo last entry</button></div>{entries.length ? <div className="entries">{entries.map((entry) => <div className="entry" key={entry.id}><div><strong>{entry.name}</strong><span>{entry.category}{entry.serving ? ` · ${entry.serving}` : ''}</span></div><p>{macroLine(entry)}</p></div>)}</div> : <p className="empty">Nothing logged for {new Intl.DateTimeFormat(undefined, { month: 'long', day: 'numeric' }).format(clock)} yet.</p>}</section>
+      <section className="saved-section" id="saved-recipes"><div className="section-title"><div><p className="eyebrow">KEEP THE GOOD ONES</p><h2>Saved recipes</h2></div><span className="step">04</span></div><form className="recipe-import" onSubmit={(event) => void importRecipe(event)}><div><h3>Import from a recipe website</h3><p>We save only the recipe name, ingredients, and instructions—not the surrounding article.</p></div><div className="import-control"><label className="visually-hidden" htmlFor="recipe-url">Recipe website URL</label><input id="recipe-url" type="url" required value={recipeUrl} onChange={(event) => { setRecipeUrl(event.target.value); setImportState('idle') }} placeholder="https://example.com/recipe" /><button className="secondary" type="submit" disabled={importState === 'saving'}>{importState === 'saving' ? 'Importing…' : 'Import recipe'}</button></div>{importState === 'saved' && <p className="saved">Recipe imported to your account.</p>}{importError && <p className="error">{importError}</p>}</form>{savedRecipes.length ? <div className="saved-recipes">{savedRecipes.map((recipe) => <article className="saved-recipe" key={recipe.id}><div className="saved-recipe-head"><div><p className="recipe-source">{recipe.source === 'imported' ? 'IMPORTED RECIPE' : 'SAVED MEAL'}</p><h3>{recipe.name}</h3>{recipe.source !== 'imported' && <p>{macroLine(recipe)}</p>}</div><button className="text-button" type="button" onClick={() => void removeRecipe(recipe.id)}>Remove</button></div><details><summary>View recipe</summary>{recipe.ingredients?.length || recipe.requiredIngredients?.length ? <><h4>Ingredients</h4><ul>{[...(recipe.ingredients || []), ...(recipe.requiredIngredients || [])].map((ingredient, index) => <li key={`${index}-${ingredient}`}>{ingredient}</li>)}</ul></> : null}{recipe.steps?.length ? <><h4>Instructions</h4><ol>{recipe.steps.map((step) => <li key={step}>{step}</li>)}</ol></> : <p className="empty">This older saved meal has no stored instructions.</p>}</details></article>)}</div> : <p className="empty">Save a meal idea or import a recipe you want to make again.</p>}</section>
     </>}
 
-    {scanReviewOpen && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && ingredientState !== 'saving') setScanReviewOpen(false) }}><section className="scan-review" role="dialog" aria-modal="true" aria-labelledby="scan-review-title"><div className="review-head"><div><p className="eyebrow">REVIEW BEFORE SAVING</p><h2 id="scan-review-title">What should we keep?</h2></div><button className="dialog-close" type="button" aria-label="Close review" disabled={ingredientState === 'saving'} onClick={() => setScanReviewOpen(false)}>×</button></div><p className="section-copy">Uncheck incorrect results, rename unclear items, and add anything the {scanMode} scan missed.</p><div className="review-list">{scanCandidates.length ? scanCandidates.map((candidate) => <div className={`review-item ${candidate.keep ? '' : 'removed'}`} key={candidate.id}><input className="row-check" type="checkbox" checked={candidate.keep} aria-label={`Keep ${candidate.name}`} onChange={() => setScanCandidates((current) => current.map((item) => item.id === candidate.id ? { ...item, keep: !item.keep } : item))} /><div><input value={candidate.name} disabled={!candidate.keep} aria-label="Detected ingredient name" onChange={(event) => setScanCandidates((current) => current.map((item) => item.id === candidate.id ? { ...item, name: event.target.value } : item))} /><div className="candidate-meta"><span className={`confidence ${candidate.confidence}`}>{candidate.confidence} confidence</span>{candidate.note && <span>{candidate.note}</span>}</div></div></div>) : <p className="empty">No clear food was detected. Add any visible ingredients below.</p>}</div><div className="review-add"><input value={reviewInput} onChange={(event) => setReviewInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addReviewIngredient() } }} placeholder="Add a missed ingredient…" /><button className="secondary" type="button" onClick={addReviewIngredient}>Add</button></div><div className="review-actions"><button className="primary" type="button" disabled={ingredientState === 'saving'} onClick={() => void confirmScanReview()}>{ingredientState === 'saving' ? 'Saving kitchen…' : `Add ${scanCandidates.filter((item) => item.keep && cleanIngredient(item.name)).length} to kitchen`}</button><button className="secondary" type="button" disabled={ingredientState === 'saving'} onClick={() => setScanReviewOpen(false)}>Cancel</button></div>{ingredientError && <p className="error">{ingredientError}</p>}</section></div>}
+    {scanReviewOpen && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && ingredientState !== 'saving') setScanReviewOpen(false) }}><section ref={scanDialogRef} className="scan-review" role="dialog" aria-modal="true" aria-labelledby="scan-review-title" tabIndex={-1}><div className="review-head"><div><p className="eyebrow">REVIEW BEFORE SAVING</p><h2 id="scan-review-title">What should we keep?</h2></div><button className="dialog-close" type="button" aria-label="Close review" disabled={ingredientState === 'saving'} onClick={() => setScanReviewOpen(false)}>×</button></div><p className="section-copy">Uncheck incorrect results, rename unclear items, and add anything the {reviewScanMode} scan missed.</p><div className="review-list">{scanCandidates.length ? scanCandidates.map((candidate) => <div className={`review-item ${candidate.keep ? '' : 'removed'}`} key={candidate.id}><input className="row-check" type="checkbox" checked={candidate.keep} aria-label={`Keep ${candidate.name}`} onChange={() => setScanCandidates((current) => current.map((item) => item.id === candidate.id ? { ...item, keep: !item.keep } : item))} /><div><input value={candidate.name} disabled={!candidate.keep} aria-label="Detected ingredient name" onChange={(event) => setScanCandidates((current) => current.map((item) => item.id === candidate.id ? { ...item, name: event.target.value } : item))} /><div className="candidate-meta"><span className={`confidence ${candidate.confidence}`}>{candidate.confidence} confidence</span>{candidate.note && <span>{candidate.note}</span>}</div></div></div>) : <p className="empty">No clear food was detected. Add any visible ingredients below.</p>}</div><label className="field-label" htmlFor="review-ingredient">Add a missed ingredient</label><div className="review-add"><input id="review-ingredient" value={reviewInput} onChange={(event) => setReviewInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addReviewIngredient() } }} placeholder="For example: carrots" /><button className="secondary" type="button" onClick={addReviewIngredient}>Add</button></div><div className="review-actions"><button className="primary" type="button" disabled={ingredientState === 'saving' || !scanCandidates.some((item) => item.keep && cleanIngredient(item.name))} onClick={() => void confirmScanReview()}>{ingredientState === 'saving' ? 'Saving kitchen…' : `Add ${scanCandidates.filter((item) => item.keep && cleanIngredient(item.name)).length} to kitchen`}</button><button className="secondary" type="button" disabled={ingredientState === 'saving'} onClick={() => setScanReviewOpen(false)}>Cancel</button></div>{ingredientError && <p className="error" role="alert">{ingredientError}</p>}</section></div>}
   </main>
 }
 

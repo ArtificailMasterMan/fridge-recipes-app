@@ -5,6 +5,17 @@ const MAX_MACRO = 20_000
 const MAX_TEXT = 500
 const macro = (value) => Number.isFinite(Number(value)) ? Math.max(0, Math.min(MAX_MACRO, Math.round(Number(value)))) : 0
 const text = (value, maximum = MAX_TEXT) => typeof value === 'string' ? value.trim().slice(0, maximum) : ''
+const list = (value, maximumItems = 30) => {
+  if (!Array.isArray(value)) return []
+  const seen = new Set()
+  return value.flatMap((item) => {
+    const clean = text(item, 100)
+    const key = clean.toLowerCase()
+    if (!clean || seen.has(key)) return []
+    seen.add(key)
+    return [clean]
+  }).slice(0, maximumItems)
+}
 const date = (value) => {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
   const [year, month, day] = value.split('-').map(Number)
@@ -14,8 +25,9 @@ const date = (value) => {
 const meal = (value) => ({
   name: text(value?.name, 120), timeMinutes: Number.isFinite(Number(value?.timeMinutes)) ? Math.max(0, Math.min(600, Math.round(Number(value.timeMinutes)))) : null,
   calories: macro(value?.calories), protein: macro(value?.protein), carbs: macro(value?.carbs), fat: macro(value?.fat),
-  macroFit: text(value?.macroFit, 100), inventory: text(value?.inventory, 200), whyItFits: text(value?.whyItFits, 500),
-  missingIngredients: Array.isArray(value?.missingIngredients) ? value.missingIngredients.map((item) => text(item, 100)).filter(Boolean).slice(0, 8) : [],
+  macroFit: text(value?.macroFit, 100), whyItFits: text(value?.whyItFits, 500),
+  ingredients: list(value?.ingredients, 20), requiredIngredients: list(value?.requiredIngredients, 8), optionalUpgrades: list(value?.optionalUpgrades, 8),
+  effort: value?.effort === 'minimal' ? 'minimal' : 'standard', usesOven: Boolean(value?.usesOven), flavorProfile: text(value?.flavorProfile, 40),
   steps: Array.isArray(value?.steps) ? value.steps.map((item) => text(item, 300)).filter(Boolean).slice(0, 8) : [],
   source: 'generated',
 })
@@ -53,6 +65,11 @@ export default async function handler(request, response) {
       const profile = { name: text(request.body?.profile?.name, 100), calories: macro(request.body?.profile?.calories), protein: macro(request.body?.profile?.protein), carbs: macro(request.body?.profile?.carbs), fat: macro(request.body?.profile?.fat), updatedAt: FieldValue.serverTimestamp() }
       await root.collection('profile').doc('default').set(profile, { merge: true })
       return response.json({ profile })
+    }
+    if (action === 'save-avoidances') {
+      const avoidedIngredients = list(request.body?.avoidedIngredients)
+      await root.collection('profile').doc('default').set({ avoidedIngredients, updatedAt: FieldValue.serverTimestamp() }, { merge: true })
+      return response.json({ avoidedIngredients })
     }
     if (action === 'save-ingredients') {
       const items = Array.isArray(request.body?.items) ? [...new Set(request.body.items.map((item) => text(item, 100)).filter(Boolean))].slice(0, 100) : []

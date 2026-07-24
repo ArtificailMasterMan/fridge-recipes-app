@@ -3,6 +3,7 @@ import {
   buildMealRecommendationPrompt,
   mealRecommendationSchema,
   MealRecommendationError,
+  normalizeMealConstraints,
   normalizeMealRequest,
   parseMealRecommendationResult,
   calculateRemainingMacros,
@@ -55,9 +56,16 @@ export default async function handler(request, response) {
       profileSnapshot.exists ? profileSnapshot.data() : null,
       entrySnapshot.docs.map((entry) => entry.data()),
     )
+    const profile = profileSnapshot.exists ? profileSnapshot.data() : null
+    const constraints = normalizeMealConstraints({
+      ...request.body?.preferences,
+      avoidedIngredients: profile?.avoidedIngredients,
+      rejectedMeals: request.body?.rejectedMeals,
+    })
     const context = {
       ingredients,
       remaining,
+      constraints,
       mealRequest: normalizeMealRequest(request.body?.mealRequest),
     }
 
@@ -73,7 +81,7 @@ export default async function handler(request, response) {
       messages: [{ role: 'user', content: buildMealRecommendationPrompt(context) }],
     })
 
-    response.json(recommendationResponse(parseMealRecommendationResult(result), remaining))
+    response.json(recommendationResponse(parseMealRecommendationResult(result), remaining, constraints))
   } catch (error) {
     recommendationError(response, error)
   }
