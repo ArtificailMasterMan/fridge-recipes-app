@@ -8,6 +8,7 @@ import {
   buildMealRecommendationPrompt,
   mealRecommendationSchema,
   MealRecommendationError,
+  normalizeMealConstraints,
   normalizeMealRequest,
   normalizeRemainingMacros,
   parseMealRecommendationResult,
@@ -104,9 +105,15 @@ app.post('/api/recommend-meals', async (request, response) => {
 
   let context
   try {
+    const constraints = normalizeMealConstraints({
+      ...request.body?.preferences,
+      avoidedIngredients: request.body?.avoidedIngredients,
+      rejectedMeals: request.body?.rejectedMeals,
+    })
     context = {
       ingredients,
       remaining: normalizeRemainingMacros(request.body?.remaining),
+      constraints,
       mealRequest: normalizeMealRequest(request.body?.mealRequest),
     }
   } catch (error) {
@@ -132,7 +139,7 @@ app.post('/api/recommend-meals', async (request, response) => {
         content: buildMealRecommendationPrompt(context),
       }],
     })
-    response.json(recommendationResponse(parseMealRecommendationResult(result), context.remaining))
+    response.json(recommendationResponse(parseMealRecommendationResult(result), context.remaining, context.constraints))
   } catch (error) {
     console.error('Meal recommendations failed:', error)
     const message = error instanceof MealRecommendationError
