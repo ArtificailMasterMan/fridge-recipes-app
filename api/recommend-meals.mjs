@@ -1,21 +1,80 @@
-import { anthropic, limitUser, parseModelJson, requireUser, sendError, textResult } from './_shared.mjs'
+import { anthropic, adminDatabase, limitUser, requireUser, sendError } from './_shared.mjs'
+import {
+  buildMealRecommendationPrompt,
+  mealRecommendationSchema,
+  MealRecommendationError,
+  normalizeMealRequest,
+  parseMealRecommendationResult,
+  calculateRemainingMacros,
+  recommendationResponse,
+  validLocalDate,
+} from './_meal-recommendations.mjs'
+
+const MAX_INGREDIENTS = 30
+
+function ingredientsFrom(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item) => typeof item === 'string' && item.trim())
+    .map((item) => item.trim().replace(/\s+/g, ' ').slice(0, 100))
+    .slice(0, MAX_INGREDIENTS)
+}
+
+function recommendationError(response, error) {
+  if (error instanceof MealRecommendationError) {
+    return response.status(error.statusCode).json({ error: error.message })
+  }
+  const message = error instanceof Error ? error.message : ''
+  if (message === 'Sign in to continue.' || message.includes('Too many') || message.includes('not configured')) {
+    return sendError(response, error)
+  }
+  console.error('Meal recommendations failed:', error)
+  return response.status(502).json({ error: 'Meal recommendations did not complete. Please try again.' })
+}
 
 export default async function handler(request, response) {
   if (request.method !== 'POST') return response.status(405).json({ error: 'Method not allowed.' })
+
   try {
     const user = await requireUser(request)
     limitUser(user.uid)
-    const ingredients = Array.isArray(request.body?.ingredients)
-      ? request.body.ingredients.filter((item) => typeof item === 'string' && item.trim()).slice(0, 30)
-      : []
+
+    const ingredients = ingredientsFrom(request.body?.ingredients)
     if (!ingredients.length) return response.status(400).json({ error: 'Add or confirm at least one ingredient first.' })
-    const context = { ingredients, remaining: request.body?.remaining ?? null, mealRequest: typeof request.body?.mealRequest === 'string' ? request.body.mealRequest.slice(0, 120) : 'a satisfying meal' }
+
+    const currentDate = validLocalDate(request.body?.currentDate)
+    if (!currentDate) return response.status(400).json({ error: 'A valid local calendar date is required.' })
+
+    const database = adminDatabase()
+    const root = database.collection('users').doc(user.uid)
+    const [profileSnapshot, entrySnapshot] = await Promise.all([
+      root.collection('profile').doc('default').get(),
+      root.collection('dailyLogs').doc(currentDate).collection('entries').get(),
+    ])
+    const remaining = calculateRemainingMacros(
+      profileSnapshot.exists ? profileSnapshot.data() : null,
+      entrySnapshot.docs.map((entry) => entry.data()),
+    )
+    const context = {
+      ingredients,
+      remaining,
+      mealRequest: normalizeMealRequest(request.body?.mealRequest),
+    }
+
     const result = await anthropic().messages.create({
-      model: 'claude-sonnet-5', max_tokens: 1700,
-      messages: [{ role: 'user', content: `You are a practical home cook and macro-aware meal planner. Build 1 to 3 genuinely appetizing, cohesive meal ideas from this context: ${JSON.stringify(context)}. Flavor and a plausible cooking technique are mandatory. Never force odd combinations just to satisfy macros. Prefer listed ingredients and only name a few common missing ingredients when they materially improve the meal. Nutrition is always an estimate. Return JSON only: {"meals":[{"name":"...","timeMinutes":20,"calories":500,"protein":35,"carbs":55,"fat":15,"macroFit":"excellent fit|good fit|...","inventory":"ready now|missing: ...","whyItFits":"one concise sentence","missingIngredients":["..."],"steps":["short step","short step"]}]}.` }],
+      model: 'claude-sonnet-5',
+      max_tokens: 3_600,
+      output_config: {
+        format: {
+          type: 'json_schema',
+          schema: mealRecommendationSchema,
+        },
+      },
+      messages: [{ role: 'user', content: buildMealRecommendationPrompt(context) }],
     })
-    const output = parseModelJson(textResult(result))
-    if (!Array.isArray(output?.meals)) throw new Error('The AI returned invalid meal recommendations.')
-    response.json({ meals: output.meals.filter((meal) => typeof meal?.name === 'string').slice(0, 3) })
-  } catch (error) { sendError(response, error) }
+
+    response.json(recommendationResponse(parseMealRecommendationResult(result), remaining))
+  } catch (error) {
+    recommendationError(response, error)
+  }
 }
